@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mapa de Clientes</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { margin: 0; padding: 0; font-family: Arial, sans-serif; transition: overflow 0.3s ease; }
+    body.no-scroll { overflow: hidden; }
+    #map { height: 100vh; width: 100%; }
+
+    .locate-btn {
+        position: absolute;
+        bottom: 80px;
+        right: 20px;
+        background-color: #fff;
+        border: none;
+        border-radius: 50%;
+        width: 46px;
+        height: 46px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        cursor: pointer;
+        z-index: 1000;
+        transition: background-color 0.2s, transform 0.1s;
+    }
+    .locate-btn:hover { background-color: #f5f5f5; transform: scale(1.05); }
+    .locate-btn:active { transform: scale(0.95); }
+    .locate-btn svg { width: 22px; height: 22px; fill: #4285F4; }
+
+    .accuracy-warning {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: rgba(0, 0, 0, 0.75);
+        color: white;
+        padding: 8px 15px;
+        border-radius: 4px;
+        font-size: 14px;
+        z-index: 1000;
+        opacity: 0;
+        transition: opacity 0.5s ease-in-out;
+        pointer-events: none;
+    }
+    .accuracy-warning.show { opacity: 1; }
+
+    .sidebar {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 100%;
+        max-width: 400px;
+        height: 100%;
+        background-color: #fff;
+        box-shadow: -4px 0 10px rgba(0,0,0,0.2);
+        z-index: 1001;
+        transform: translateX(100%);
+        transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+        overflow-y: auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+    }
+    .sidebar.open { transform: translateX(0); }
+
+    .sidebar-close {
+        position: sticky;
+        top: 0;
+        align-self: flex-end;
+        font-size: 30px;
+        cursor: pointer;
+        border: none;
+        background: none;
+        color: #555;
+        padding: 5px;
+        margin-right: -10px;
+        transition: color 0.2s;
+    }
+    .sidebar-close:hover { color: #333; }
+
+    .sidebar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #eee;
+    }
+
+    .sidebar-content { flex-grow: 1; padding-top: 10px; }
+
+    .photo-gallery {
+        display: flex;
+        overflow-x: auto;
+        gap: 10px;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+        scrollbar-color: #ccc transparent;
+    }
+    .photo-gallery::-webkit-scrollbar { height: 8px; }
+    .photo-gallery::-webkit-scrollbar-thumb { background-color: #ccc; border-radius: 10px; border: 2px solid #fff; }
+
+    .photo-gallery img {
+        width: 200px;
+        height: 150px;
+        object-fit: cover;
+        border-radius: 8px;
+        flex-shrink: 0;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+
+    .info-item { margin-bottom: 12px; line-height: 1.5; color: #444; }
+    .info-item strong { color: #222; }
+    .info-item a { color: #007bff; }
+
+    @media (max-width: 600px) {
+        .sidebar { width: 100%; max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="map"></div>
+
+  <button class="locate-btn" id="locateBtn" title="Centralizar em mim">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path d="M12 8a4 4 0 1 0 4 4 4.004 4.004 0 0 0-4-4Zm10 3h-1.071A8.994 8.994 0 0 0 13 3.071V2a1 1 0 0 0-2 0v1.071A8.994 8.994 0 0 0 3.071 11H2a1 1 0 0 0 0 2h1.071A8.994 8.994 0 0 0 11 20.929V22a1 1 0 0 0 2 0v-1.071A8.994 8.994 0 0 0 20.929 13H22a1 1 0 0 0 0-2ZM12 19a7 7 0 1 1 7-7 7.008 7.008 0 0 1-7 7Z"/>
+      </svg>
+  </button>
+
+  <div id="accuracyWarning" class="accuracy-warning">Não foi possível pegar localização exata</div>
+
+  <!-- Sidebar -->
+  <div id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+          <h2 id="sidebar-title">Detalhes do Cliente</h2>
+          <button class="sidebar-close" id="sidebarCloseBtn">&times;</button>
+      </div>
+      <div id="sidebar-content" class="sidebar-content"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let map;
+    let userMarker;
+    let userCircle;
+    let userPosition = null;
+    let clientes = [];
+
+    const API_URL = "/clientes";  // ALTERE AQUI
+    const ACCURACY_THRESHOLD = 200;
+
+    map = L.map("map").setView([-14.235, -51.9253], 4);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    const logoPin = L.divIcon({
+      html: `
+      <svg viewBox="0 0 192 192" width="75" height="75" xmlns="http://www.w3.org/2000/svg" fill="none">
+        <path fill="#009ee0" stroke="#009ee0" stroke-width="7" d="M96 22a59 59 0 0 0-31 10 59 59 0 0 0-22 27 59 59 0 0 0-3 34 59 59 0 0 0 16 30c11 11 36 26 38 43 0 2 2 4 4 4s4-2 4-4c2-17 27-32 38-43a59 59 0 0 0 16-30 59 59 0 0 0-3-34 59 59 0 0 0-22-27 59 59 0 0 0-31-10Z"/>
+        <circle cx="96" cy="82" r="54" fill="white" stroke="#009ee0" stroke-width="3"/>
+        <clipPath id="cliplogo">
+          <circle cx="96" cy="82" r="54"/>
+        </clipPath>
+        <image href="logo.jpg" x="39" y="20" width="118" height="132" clip-path="url(#cliplogo)" />
+      </svg>
+      `,
+      className: "",
+      iconSize: [75, 75],
+      iconAnchor: [37.5, 70],
+      popupAnchor: [0, -65]
+    });
+
+    async function carregarClientes() {
+      try {
+        const res = await fetch(API_URL);
+        const data = await res.json();
+
+        clientes = data
+          .filter(c => c.latitude && c.longitude)
+          .map(c => ({
+            nome: c.nome,
+            telefone: c.telefone,
+            site: c.site,
+            social: c.social,
+            cep: c.cep,
+            coords: [c.latitude, c.longitude],
+            fotos: c.fotos ? JSON.parse(c.fotos) : []
+          }));
+
+        adicionarMarcadores();
+      } catch (err) {
+        console.error("Erro ao carregar clientes:", err);
+      }
+    }
+
+    function adicionarMarcadores() {
+      clientes.forEach(c => {
+        const tooltipContent = `
+          <strong>${c.nome}</strong><br>
+          ${c.telefone ? `Telefone: ${c.telefone}<br>` : ""}
+          ${c.site ? `Site: <a href="${c.site}" target="_blank">${c.site}</a><br>` : ""}
+          ${c.social ? `Rede Social: ${c.social}<br>` : ""}
+          CEP: ${c.cep}
+        `;
+
+        const marker = L.marker(c.coords, { icon: logoPin })
+          .addTo(map)
+          .bindTooltip(tooltipContent, {
+            direction: "top",
+            offset: [0, -30]
+          });
+
+        marker.on("click", () => {
+          openSidebar(c);
+          map.setView(c.coords, map.getZoom());
+        });
+      });
+    }
+
+    function openSidebar(cliente) {
+      const sidebar = document.getElementById("sidebar");
+      const sidebarContent = document.getElementById("sidebar-content");
+      const sidebarTitle = document.getElementById("sidebar-title");
+
+      sidebarTitle.textContent = cliente.nome;
+
+      let galleryHTML = "";
+      if (cliente.fotos.length > 0) {
+        galleryHTML = '<div class="photo-gallery">';
+        cliente.fotos.forEach(url => {
+          galleryHTML += `<img src="${url}" alt="Foto de ${cliente.nome}" loading="lazy">`;
+        });
+        galleryHTML += "</div>";
+      }
+
+      const lat = cliente.coords[0];
+      const lng = cliente.coords[1];
+      const num = cliente.telefone ? cliente.telefone.replace(/\D/g, "") : null;
+      const linkWhats = num ? `https://wa.me/55${num}` : null;
+
+      sidebarContent.innerHTML = `
+        ${galleryHTML}
+        <div class="info-item"><strong>Telefone:</strong> ${cliente.telefone || "Não informado"}</div>
+        <div class="info-item"><strong>CEP:</strong> ${cliente.cep}</div>
+        <div class="info-item"><strong>Site:</strong> ${cliente.site ? `<a href="${cliente.site}" target="_blank">${cliente.site}</a>` : "Não informado"}</div>
+        <div class="info-item"><strong>Rede Social:</strong> ${cliente.social ? `<a href="https://instagram.com/${cliente.social.replace("@","")}" target="_blank">${cliente.social}</a>` : "Não informado"}</div>
+
+        <div style="display:flex; gap:10px; margin-top:15px;">
+          <a href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}"
+            target="_blank"
+            style="flex:1; padding:10px; text-align:center; background:#4285F4; color:white; border-radius:5px;">
+            Abrir no Maps
+          </a>
+
+          ${linkWhats ? `
+          <a href="${linkWhats}" target="_blank"
+            style="flex:1; padding:10px; text-align:center; background:#25D366; color:white; border-radius:5px;">
+            WhatsApp
+          </a>` : ""}
+        </div>
+      `;
+
+      sidebar.classList.add("open");
+      document.body.classList.add("no-scroll");
+    }
+
+    document.getElementById("sidebarCloseBtn").addEventListener("click", () => {
+      document.getElementById("sidebar").classList.remove("open");
+      document.body.classList.remove("no-scroll");
+    });
+
+    function distanciaKm(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 +
+        Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+        Math.sin(dLon/2)**2;
+      return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+    }
+
+    function showWarning() {
+      const warning = document.getElementById("accuracyWarning");
+      warning.classList.add("show");
+      setTimeout(() => warning.classList.remove("show"), 4000);
+    }
+
+    function mostrarLocalizacao() {
+      if (!navigator.geolocation) {
+        alert("Seu navegador não suporta geolocalização.");
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          const userLat = pos.coords.latitude;
+          const userLng = pos.coords.longitude;
+          const accuracy = pos.coords.accuracy;
+
+          userPosition = [userLat, userLng];
+
+          if (userMarker) map.removeLayer(userMarker);
+          if (userCircle) map.removeLayer(userCircle);
+
+          userCircle = L.circle(userPosition, {
+            radius: accuracy,
+            color: "#4285F4",
+            fillColor: "#4285F4",
+            fillOpacity: 0.2,
+            weight: 2
+          }).addTo(map);
+
+          if (accuracy > ACCURACY_THRESHOLD) {
+            map.setView(userPosition, 16);
+            showWarning();
+          } else {
+            userMarker = L.marker(userPosition, {
+              icon: logoPin
+            })
+              .addTo(map)
+              .bindPopup("<strong>Você está aqui</strong>")
+              .openPopup();
+
+            map.setView(userPosition, 16);
+          }
+        },
+        err => alert("Erro ao obter localização: " + err.message),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    }
+
+    document.getElementById("locateBtn").addEventListener("click", () => {
+      if (userPosition) {
+        map.setView(userPosition, 16);
+        if (userMarker) userMarker.openPopup();
+      } else {
+        mostrarLocalizacao();
+      }
+    });
+
+    mostrarLocalizacao();
+    carregarClientes();
+  </script>
+
+</body>
+</html>
