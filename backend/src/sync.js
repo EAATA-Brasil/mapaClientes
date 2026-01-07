@@ -5,7 +5,6 @@ import geocode from "./geocode.js";
 function buildEnderecoCompleto({ logradouro, numero, bairro, cidade, uf, cep, pais }) {
   const cepLimpo = (cep || "").replace(/\D/g, "");
 
-  // monta só com o que existe
   const parts = [
     logradouro?.trim(),
     numero?.trim(),
@@ -13,12 +12,12 @@ function buildEnderecoCompleto({ logradouro, numero, bairro, cidade, uf, cep, pa
     cidade?.trim(),
     uf?.trim(),
     cepLimpo || null,
-    pais?.trim() || "Brasil",
+    (pais || "Brasil")?.trim(),
   ].filter(Boolean);
 
   const q = parts.join(", ").replace(/\s+/g, " ").trim();
 
-  // bloqueia casos tipo "Brasil" ou muito vazio
+  // bloqueia "Brasil" sozinho ou muito vazio
   const semPontuacao = q.replace(/[, ]/g, "");
   if (!q || q === "Brasil" || semPontuacao.length < 8) return null;
 
@@ -36,7 +35,7 @@ export async function syncClientes() {
       return;
     }
 
-    // PROCESSAR UM POR VEZ — EVITA DEADLOCKS
+    // PROCESSAR UM POR VEZ
     for (const c of clientes) {
       await processarCliente(c);
     }
@@ -53,12 +52,13 @@ async function processarCliente(c) {
     const numero = c.l10n_br_endereco_numero || "";
     const complemento = c.street2 || "";
 
-    // ✅ bairro certo (você trouxe esse campo no odoo.js)
+    // ✅ bairro correto
     const bairro = c.l10n_br_endereco_bairro || "";
 
     const cidade = c.city || "";
     const estadoCompleto = c.state_id ? c.state_id[1] : "";
     const estadoSigla = estadoCompleto.match(/\((.*?)\)/)?.[1] || "";
+
     const cep = c.zip || "";
     const pais = c.country_id ? c.country_id[1] : "Brasil";
 
@@ -77,7 +77,7 @@ async function processarCliente(c) {
       return;
     }
 
-    // ✅ passa o CEP (ativa ViaCEP no teu geocode.js)
+    // ✅ passa o CEP para ativar ViaCEP no geocode
     const coords = await geocode(enderecoCompleto, cep);
 
     await db.query(
@@ -118,10 +118,9 @@ async function processarCliente(c) {
         pais,
         enderecoCompleto,
         coords?.lat || null,
-        coords?.lng || null
+        coords?.lng || null,
       ]
     );
-
   } catch (err) {
     console.error(`⚠️ Erro processando cliente ${c.name}:`, err);
   }
