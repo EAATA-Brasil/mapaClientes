@@ -2,6 +2,29 @@ import db from "./db.js";
 import { getCustomers } from "./odoo.js";
 import geocode from "./geocode.js";
 
+function buildEnderecoCompleto({ logradouro, numero, bairro, cidade, uf, cep, pais }) {
+  const cepLimpo = (cep || "").replace(/\D/g, "");
+
+  // monta só com o que existe
+  const parts = [
+    logradouro?.trim(),
+    numero?.trim(),
+    bairro?.trim(),
+    cidade?.trim(),
+    uf?.trim(),
+    cepLimpo || null,
+    pais?.trim() || "Brasil",
+  ].filter(Boolean);
+
+  const q = parts.join(", ").replace(/\s+/g, " ").trim();
+
+  // bloqueia casos tipo "Brasil" ou muito vazio
+  const semPontuacao = q.replace(/[, ]/g, "");
+  if (!q || q === "Brasil" || semPontuacao.length < 8) return null;
+
+  return q;
+}
+
 export async function syncClientes() {
   console.log("🔄 Sincronizando clientes do Odoo…");
 
@@ -29,27 +52,33 @@ async function processarCliente(c) {
     const logradouro = c.street || "";
     const numero = c.l10n_br_endereco_numero || "";
     const complemento = c.street2 || "";
-    const bairro = c.district || "";
+
+    // ✅ bairro certo (você trouxe esse campo no odoo.js)
+    const bairro = c.l10n_br_endereco_bairro || "";
+
     const cidade = c.city || "";
     const estadoCompleto = c.state_id ? c.state_id[1] : "";
-    const estadoSigla =
-      estadoCompleto.match(/\((.*?)\)/)?.[1] || "";
+    const estadoSigla = estadoCompleto.match(/\((.*?)\)/)?.[1] || "";
     const cep = c.zip || "";
     const pais = c.country_id ? c.country_id[1] : "Brasil";
 
-    // SE O ENDEREÇO ESTÁ MUITO RUIM → IGNORA
-    const enderecoCompleto = `${logradouro} ${numero}, ${bairro}, ${cidade}, ${estadoSigla}, ${cep}, ${pais}`
-      .replace(/\s+/g, " ")
-      .replace(/, ,/g, ",")
-      .trim();
+    const enderecoCompleto = buildEnderecoCompleto({
+      logradouro,
+      numero,
+      bairro,
+      cidade,
+      uf: estadoSigla,
+      cep,
+      pais,
+    });
 
-    if (enderecoCompleto.length < 10) {
-      console.warn(`⚠️ Endereço inválido para ${c.name}, ignorando…`);
+    if (!enderecoCompleto) {
+      console.warn(`⚠️ Endereço muito incompleto para ${c.name}, ignorando geocode…`);
       return;
     }
 
-    // GEOCODING
-    const coords = await geocode(enderecoCompleto);
+    // ✅ passa o CEP (ativa ViaCEP no teu geocode.js)
+    const coords = await geocode(enderecoCompleto, cep);
 
     await db.query(
       `INSERT INTO clientes (
