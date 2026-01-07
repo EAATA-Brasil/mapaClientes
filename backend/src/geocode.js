@@ -27,8 +27,7 @@ function isRetryableNetworkError(err) {
 
 // ===== configs =====
 const NOMINATIM_HOSTS = [
-  "https://nominatim.openstreetmap.org",
-  "https://nominatim.openstreetmap.de",
+  "https://nominatim.openstreetmap.org"
 ];
 
 // intervalo entre chamadas ao nominatim (1.5s ainda é agressivo)

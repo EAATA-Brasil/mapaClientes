@@ -10,6 +10,121 @@
     body.no-scroll { overflow: hidden; }
     #map { height: 100vh; width: 100%; }
 
+    /* TOP SEARCH BAR */
+    .topbar {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      right: 14px;
+      z-index: 1200;
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+      pointer-events: none;
+    }
+
+    .search-wrap {
+      pointer-events: auto;
+      flex: 1;
+      max-width: 720px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+      overflow: hidden;
+      border: 1px solid rgba(0,0,0,0.08);
+    }
+
+    .search-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+    }
+
+    .search-icon {
+      width: 18px;
+      height: 18px;
+      opacity: .65;
+      flex: 0 0 auto;
+    }
+
+    #searchInput {
+      border: none;
+      outline: none;
+      width: 100%;
+      font-size: 15px;
+      padding: 6px 2px;
+    }
+
+    .search-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex: 0 0 auto;
+    }
+
+    .chip {
+      border: 1px solid rgba(0,0,0,0.12);
+      background: #fafafa;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: transform .08s, background .15s;
+      user-select: none;
+      white-space: nowrap;
+    }
+    .chip:hover { background: #f2f2f2; transform: translateY(-1px); }
+    .chip:active { transform: translateY(0); }
+
+    .filters-row {
+      display: flex;
+      gap: 10px;
+      padding: 10px 12px 12px;
+      border-top: 1px solid rgba(0,0,0,0.06);
+      background: linear-gradient(#fff, #fbfbfb);
+    }
+
+    .filters-row select {
+      width: 100%;
+      border: 1px solid rgba(0,0,0,0.12);
+      border-radius: 10px;
+      padding: 10px 10px;
+      font-size: 14px;
+      outline: none;
+      background: #fff;
+    }
+
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 12px 10px;
+      color: #555;
+      font-size: 12.5px;
+    }
+
+    .results {
+      max-height: 320px;
+      overflow: auto;
+      border-top: 1px solid rgba(0,0,0,0.06);
+      display: none;
+      background: #fff;
+    }
+    .results.show { display: block; }
+
+    .result-item {
+      padding: 10px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid rgba(0,0,0,0.06);
+      transition: background .12s;
+    }
+    .result-item:hover { background: #f7f7f7; }
+    .result-title { font-weight: 700; font-size: 14px; color: #1f1f1f; }
+    .result-sub { font-size: 12.5px; color: #666; margin-top: 2px; }
+
+    /* Locate button */
     .locate-btn {
         position: absolute;
         bottom: 80px;
@@ -48,6 +163,7 @@
     }
     .accuracy-warning.show { opacity: 1; }
 
+    /* Sidebar */
     .sidebar {
         position: fixed;
         top: 0;
@@ -121,12 +237,45 @@
 
     @media (max-width: 600px) {
         .sidebar { width: 100%; max-width: 100%; }
+        .topbar { left: 10px; right: 10px; }
     }
   </style>
 </head>
 <body>
 
   <div id="map"></div>
+
+  <!-- Top search / filters -->
+  <div class="topbar">
+    <div class="search-wrap">
+      <div class="search-row">
+        <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M10 2a8 8 0 105.293 14.293l4.707 4.707a1 1 0 001.414-1.414l-4.707-4.707A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"/>
+        </svg>
+        <input id="searchInput" type="text" placeholder="Buscar cliente (nome da oficina/pessoa)…" autocomplete="off" />
+        <div class="search-actions">
+          <div class="chip" id="clearBtn">Limpar</div>
+        </div>
+      </div>
+
+      <div class="filters-row">
+        <select id="estadoSelect">
+          <option value="">Todos os estados</option>
+        </select>
+        <select id="cidadeSelect" disabled>
+          <option value="">Todas as cidades</option>
+        </select>
+        <div class="chip" id="fitBtn">Enquadrar</div>
+      </div>
+
+      <div class="meta-row">
+        <div id="countLabel">Carregando…</div>
+        <div id="hintLabel">Digite para ver sugestões</div>
+      </div>
+
+      <div class="results" id="results"></div>
+    </div>
+  </div>
 
   <button class="locate-btn" id="locateBtn" title="Centralizar em mim">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
@@ -151,10 +300,24 @@
     let userMarker;
     let userCircle;
     let userPosition = null;
-    let clientes = [];
 
-    const API_URL = "/clientes";  // ALTERE AQUI
+    let clientesRaw = [];
+    let clientesView = [];
+    let markersLayer = null;
+    let markerById = new Map();
+
+    const API_URL = "/clientes"; // ✅ seu endpoint
     const ACCURACY_THRESHOLD = 200;
+
+    // elements
+    const searchInput = document.getElementById("searchInput");
+    const resultsEl = document.getElementById("results");
+    const estadoSelect = document.getElementById("estadoSelect");
+    const cidadeSelect = document.getElementById("cidadeSelect");
+    const countLabel = document.getElementById("countLabel");
+    const hintLabel = document.getElementById("hintLabel");
+    const clearBtn = document.getElementById("clearBtn");
+    const fitBtn = document.getElementById("fitBtn");
 
     map = L.map("map").setView([-14.235, -51.9253], 4);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -178,41 +341,139 @@
       popupAnchor: [0, -65]
     });
 
+    function safeFotos(fotos) {
+      if (!fotos) return [];
+      // se backend já manda array
+      if (Array.isArray(fotos)) return fotos;
+      // se manda como string JSON
+      if (typeof fotos === "string") {
+        try {
+          const parsed = JSON.parse(fotos);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch { return []; }
+      }
+      return [];
+    }
+
+    function normalizeStr(s) {
+      return String(s || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim();
+    }
+
     async function carregarClientes() {
       try {
         const res = await fetch(API_URL);
         const data = await res.json();
 
-        clientes = data
+        // guarda tudo (raw)
+        clientesRaw = (Array.isArray(data) ? data : [])
           .filter(c => c.latitude && c.longitude)
           .map(c => ({
-            nome: c.nome,
-            telefone: c.telefone,
-            site: c.site,
-            social: c.social,
-            cep: c.cep,
-            coords: [c.latitude, c.longitude],
-            fotos: c.fotos ? JSON.parse(c.fotos) : []
+            id: c.id,
+            id_odoo: c.id_odoo,
+            nome: c.nome || "Sem nome",
+            telefone: c.telefone || "",
+            celular: c.celular || "",
+            email: c.email || "",
+            site: c.site || "",
+            cep: c.cep || "",
+            estado: (c.estado || "").toString(),
+            cidade: (c.cidade || "").toString(),
+            bairro: (c.bairro || "").toString(),
+            logradouro: (c.logradouro || "").toString(),
+            endereco_completo: (c.endereco_completo || "").toString(),
+            coords: [Number(c.latitude), Number(c.longitude)],
+            fotos: safeFotos(c.fotos)
           }));
 
-        adicionarMarcadores();
+        buildFilters();
+        applyFiltersAndRender();
       } catch (err) {
         console.error("Erro ao carregar clientes:", err);
+        countLabel.textContent = "Erro ao carregar clientes";
       }
     }
 
-    function adicionarMarcadores() {
-      clientes.forEach(c => {
+    function buildFilters() {
+      // estados únicos
+      const estados = [...new Set(clientesRaw.map(c => (c.estado || "").trim()).filter(Boolean))]
+        .sort((a,b) => a.localeCompare(b, "pt-BR"));
+
+      estadoSelect.innerHTML = `<option value="">Todos os estados</option>` +
+        estados.map(e => `<option value="${e}">${e}</option>`).join("");
+
+      cidadeSelect.innerHTML = `<option value="">Todas as cidades</option>`;
+      cidadeSelect.disabled = true;
+    }
+
+    function updateCidadesByEstado(estado) {
+      const cidades = [...new Set(
+        clientesRaw
+          .filter(c => !estado || c.estado === estado)
+          .map(c => (c.cidade || "").trim())
+          .filter(Boolean)
+      )].sort((a,b) => a.localeCompare(b, "pt-BR"));
+
+      cidadeSelect.innerHTML = `<option value="">Todas as cidades</option>` +
+        cidades.map(c => `<option value="${c}">${c}</option>`).join("");
+
+      cidadeSelect.disabled = cidades.length === 0;
+    }
+
+    function getFilteredClientes() {
+      const q = normalizeStr(searchInput.value);
+      const estado = estadoSelect.value;
+      const cidade = cidadeSelect.value;
+
+      const filtered = clientesRaw.filter(c => {
+        if (estado && c.estado !== estado) return false;
+        if (cidade && c.cidade !== cidade) return false;
+
+        if (!q) return true;
+
+        const hay = normalizeStr(
+          `${c.nome} ${c.cidade} ${c.estado} ${c.bairro} ${c.cep} ${c.endereco_completo}`
+        );
+
+        return hay.includes(q);
+      });
+
+      return filtered;
+    }
+
+    function applyFiltersAndRender() {
+      clientesView = getFilteredClientes();
+
+      countLabel.textContent = `${clientesView.length} cliente(s) no mapa`;
+      hintLabel.textContent = "Selecione um resultado para abrir";
+
+      renderMarkers(clientesView);
+      renderResultsList();
+    }
+
+    function renderMarkers(items) {
+      if (markersLayer) {
+        markersLayer.clearLayers();
+        markerById.clear();
+      } else {
+        markersLayer = L.layerGroup().addTo(map);
+      }
+
+      items.forEach(c => {
         const tooltipContent = `
           <strong>${c.nome}</strong><br>
           ${c.telefone ? `Telefone: ${c.telefone}<br>` : ""}
+          ${c.cidade ? `Cidade: ${c.cidade}<br>` : ""}
+          ${c.estado ? `Estado: ${c.estado}<br>` : ""}
           ${c.site ? `Site: <a href="${c.site}" target="_blank">${c.site}</a><br>` : ""}
-          ${c.social ? `Rede Social: ${c.social}<br>` : ""}
-          CEP: ${c.cep}
+          CEP: ${c.cep || "-"}
         `;
 
         const marker = L.marker(c.coords, { icon: logoPin })
-          .addTo(map)
+          .addTo(markersLayer)
           .bindTooltip(tooltipContent, {
             direction: "top",
             offset: [0, -30]
@@ -220,7 +481,46 @@
 
         marker.on("click", () => {
           openSidebar(c);
-          map.setView(c.coords, map.getZoom());
+          map.setView(c.coords, Math.max(map.getZoom(), 14));
+        });
+
+        markerById.set(c.id, marker);
+      });
+    }
+
+    function renderResultsList() {
+      const q = normalizeStr(searchInput.value);
+      // mostra autocomplete se tiver texto
+      const show = q.length >= 1 || estadoSelect.value || cidadeSelect.value;
+      resultsEl.classList.toggle("show", show);
+
+      // limita lista pra não ficar gigante
+      const list = clientesView.slice(0, 20);
+
+      resultsEl.innerHTML = list.map(c => {
+        const sub = [c.cidade, c.estado, c.cep].filter(Boolean).join(" • ");
+        return `
+          <div class="result-item" data-id="${c.id}">
+            <div class="result-title">${c.nome}</div>
+            <div class="result-sub">${sub || "—"}</div>
+          </div>
+        `;
+      }).join("");
+
+      // click item
+      resultsEl.querySelectorAll(".result-item").forEach(el => {
+        el.addEventListener("click", () => {
+          const id = Number(el.getAttribute("data-id"));
+          const cliente = clientesRaw.find(x => x.id === id);
+          if (!cliente) return;
+
+          const marker = markerById.get(id);
+          if (marker) marker.openTooltip();
+
+          map.setView(cliente.coords, 15);
+          openSidebar(cliente);
+          resultsEl.classList.remove("show");
+          searchInput.blur();
         });
       });
     }
@@ -233,7 +533,7 @@
       sidebarTitle.textContent = cliente.nome;
 
       let galleryHTML = "";
-      if (cliente.fotos.length > 0) {
+      if (cliente.fotos && cliente.fotos.length > 0) {
         galleryHTML = '<div class="photo-gallery">';
         cliente.fotos.forEach(url => {
           galleryHTML += `<img src="${url}" alt="Foto de ${cliente.nome}" loading="lazy">`;
@@ -243,26 +543,31 @@
 
       const lat = cliente.coords[0];
       const lng = cliente.coords[1];
-      const num = cliente.telefone ? cliente.telefone.replace(/\D/g, "") : null;
+      const num = cliente.telefone ? cliente.telefone.replace(/\D/g, "") : (cliente.celular ? cliente.celular.replace(/\D/g,"") : null);
       const linkWhats = num ? `https://wa.me/55${num}` : null;
+
+      const endereco = cliente.endereco_completo || [cliente.logradouro, cliente.numero, cliente.bairro, cliente.cidade, cliente.estado, cliente.cep, cliente.pais].filter(Boolean).join(", ");
 
       sidebarContent.innerHTML = `
         ${galleryHTML}
         <div class="info-item"><strong>Telefone:</strong> ${cliente.telefone || "Não informado"}</div>
-        <div class="info-item"><strong>CEP:</strong> ${cliente.cep}</div>
+        <div class="info-item"><strong>Celular:</strong> ${cliente.celular || "Não informado"}</div>
+        <div class="info-item"><strong>Email:</strong> ${cliente.email ? `<a href="mailto:${cliente.email}">${cliente.email}</a>` : "Não informado"}</div>
+        <div class="info-item"><strong>Endereço:</strong> ${endereco || "Não informado"}</div>
+        <div class="info-item"><strong>CEP:</strong> ${cliente.cep || "-"}</div>
+        <div class="info-item"><strong>Cidade/UF:</strong> ${(cliente.cidade || "-")} / ${(cliente.estado || "-")}</div>
         <div class="info-item"><strong>Site:</strong> ${cliente.site ? `<a href="${cliente.site}" target="_blank">${cliente.site}</a>` : "Não informado"}</div>
-        <div class="info-item"><strong>Rede Social:</strong> ${cliente.social ? `<a href="https://instagram.com/${cliente.social.replace("@","")}" target="_blank">${cliente.social}</a>` : "Não informado"}</div>
 
         <div style="display:flex; gap:10px; margin-top:15px;">
           <a href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}"
             target="_blank"
-            style="flex:1; padding:10px; text-align:center; background:#4285F4; color:white; border-radius:5px;">
+            style="flex:1; padding:10px; text-align:center; background:#4285F4; color:white; border-radius:10px; text-decoration:none;">
             Abrir no Maps
           </a>
 
           ${linkWhats ? `
           <a href="${linkWhats}" target="_blank"
-            style="flex:1; padding:10px; text-align:center; background:#25D366; color:white; border-radius:5px;">
+            style="flex:1; padding:10px; text-align:center; background:#25D366; color:white; border-radius:10px; text-decoration:none;">
             WhatsApp
           </a>` : ""}
         </div>
@@ -276,16 +581,6 @@
       document.getElementById("sidebar").classList.remove("open");
       document.body.classList.remove("no-scroll");
     });
-
-    function distanciaKm(lat1, lon1, lat2, lon2) {
-      const R = 6371;
-      const dLat = (lat2 - lat1) * Math.PI / 180;
-      const dLon = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(dLat/2)**2 +
-        Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
-        Math.sin(dLon/2)**2;
-      return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-    }
 
     function showWarning() {
       const warning = document.getElementById("accuracyWarning");
@@ -322,9 +617,7 @@
             map.setView(userPosition, 16);
             showWarning();
           } else {
-            userMarker = L.marker(userPosition, {
-              icon: logoPin
-            })
+            userMarker = L.marker(userPosition, { icon: logoPin })
               .addTo(map)
               .bindPopup("<strong>Você está aqui</strong>")
               .openPopup();
@@ -344,6 +637,46 @@
       } else {
         mostrarLocalizacao();
       }
+    });
+
+    // === UI handlers ===
+    let searchTimer = null;
+    searchInput.addEventListener("input", () => {
+      // debounce
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        applyFiltersAndRender();
+      }, 180);
+    });
+
+    estadoSelect.addEventListener("change", () => {
+      updateCidadesByEstado(estadoSelect.value);
+      applyFiltersAndRender();
+    });
+
+    cidadeSelect.addEventListener("change", () => {
+      applyFiltersAndRender();
+    });
+
+    clearBtn.addEventListener("click", () => {
+      searchInput.value = "";
+      estadoSelect.value = "";
+      cidadeSelect.value = "";
+      updateCidadesByEstado("");
+      resultsEl.classList.remove("show");
+      applyFiltersAndRender();
+    });
+
+    fitBtn.addEventListener("click", () => {
+      if (!clientesView.length) return;
+      const bounds = L.latLngBounds(clientesView.map(c => c.coords));
+      map.fitBounds(bounds, { padding: [40, 40] });
+    });
+
+    // fecha lista ao clicar fora
+    document.addEventListener("click", (e) => {
+      const wrap = document.querySelector(".search-wrap");
+      if (!wrap.contains(e.target)) resultsEl.classList.remove("show");
     });
 
     mostrarLocalizacao();
