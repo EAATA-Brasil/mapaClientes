@@ -27,8 +27,8 @@ export async function syncClientes() {
 async function processarCliente(c) {
   try {
     const logradouro = c.street || "";
-    const numero = c.street2 || "";
-    const complemento = "";
+    const numero = c.l10n_br_endereco_numero || "";
+    const complemento = c.street2 || "";
     const bairro = c.district || "";
     const cidade = c.city || "";
     const estadoCompleto = c.state_id ? c.state_id[1] : "";
