@@ -42,6 +42,63 @@ const axiosNominatim = axios.create({
   validateStatus: (status) => status >= 200 && status < 500,
 });
 
+const STATE_NAME_TO_UF = {
+  'Acre': 'AC',
+  'Alagoas': 'AL',
+  'Amapá': 'AP',
+  'Amazonas': 'AM',
+  'Bahia': 'BA',
+  'Ceará': 'CE',
+  'Distrito Federal': 'DF',
+  'Espírito Santo': 'ES',
+  'Goiás': 'GO',
+  'Maranhão': 'MA',
+  'Mato Grosso': 'MT',
+  'Mato Grosso do Sul': 'MS',
+  'Minas Gerais': 'MG',
+  'Pará': 'PA',
+  'Paraíba': 'PB',
+  'Paraná': 'PR',
+  'Pernambuco': 'PE',
+  'Piauí': 'PI',
+  'Rio de Janeiro': 'RJ',
+  'Rio Grande do Norte': 'RN',
+  'Rio Grande do Sul': 'RS',
+  'Rondônia': 'RO',
+  'Roraima': 'RR',
+  'Santa Catarina': 'SC',
+  'São Paulo': 'SP',
+  'Sergipe': 'SE',
+  'Tocantins': 'TO'
+};
+
+function mapStateToUF(nameOrCode) {
+  if (!nameOrCode) return null;
+  const v = String(nameOrCode).trim();
+  if (/^[A-Z]{2}$/.test(v)) return v.toUpperCase();
+  // try direct match
+  const found = STATE_NAME_TO_UF[v] || STATE_NAME_TO_UF[capitalizeWords(v)];
+  return found || null;
+}
+
+function capitalizeWords(s) {
+  return s.replace(/\w\S*/g, (txt) => txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase());
+}
+
+function extractNormalizedFromNominatim(item, fallbackCep) {
+  const addr = item?.address || {};
+  const uf = mapStateToUF(addr.state_code || addr.state);
+  const cidade = addr.city || addr.town || addr.village || addr.municipality || addr.county || null;
+  const bairro = addr.suburb || addr.neighbourhood || addr.hamlet || null;
+  const road = addr.road || addr.pedestrian || addr.footway || null;
+  const house = addr.house_number || null;
+  const logradouro = [road, house].filter(Boolean).join(" ") || null;
+  const cep = addr.postcode || fallbackCep || null;
+  const pais = addr.country || 'Brasil';
+
+  return { uf, cidade, bairro, logradouro, cep, pais };
+}
+
 async function viaCepGet(cepLimpo, tries = 3) {
   const url = `https://viacep.com.br/ws/${cepLimpo}/json/`;
 
@@ -73,8 +130,9 @@ async function nominatimSearch(query, tries = 4) {
       // sempre espera um pouco entre chamadas
       await sleep(BASE_DELAY_MS, "rate-limit Nominatim");
 
+      // request address details so we can extract cidade/uf/bairro/logradouro
       const url =
-        `${base}/search?format=json&limit=1&countrycodes=br&addressdetails=0` +
+        `${base}/search?format=json&limit=1&countrycodes=br&addressdetails=1` +
         `&q=${encodeURIComponent(query)}`;
 
       try {
@@ -138,6 +196,15 @@ export default async function geocode(endereco, cep) {
         console.log(`🏠 Endereço normalizado: ${enderecoViaCep}`);
 
         // 2) Google (opcional)
+        const normalizedVia = {
+          uf: estado || null,
+          cidade: cidade || null,
+          bairro: bairro || null,
+          logradouro: logradouro || null,
+          cep: cepLimpo,
+          pais: 'Brasil',
+        };
+
         if (GOOGLE_KEY) {
           console.log("🧭 Tentando Google Geocoding");
           const gUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
@@ -149,18 +216,22 @@ export default async function geocode(endereco, cep) {
           if (gRes.data?.results?.length > 0) {
             console.log("✅ Google retornou coordenadas");
             const loc = gRes.data.results[0].geometry.location;
-            return { lat: loc.lat, lng: loc.lng };
+            return { lat: loc.lat, lng: loc.lng, normalized: normalizedVia };
           }
         }
-
         // 3) Nominatim usando o endereço do ViaCEP
         const nRes = await nominatimSearch(enderecoViaCep);
 
         if (nRes?.data?.length > 0) {
           console.log("📍 Coordenadas obtidas via Nominatim");
+          const item = nRes.data[0];
+          const norm = extractNormalizedFromNominatim(item, cepLimpo);
+          // merge with viacep normalized to prefer explicit fields
+          const merged = Object.assign({}, normalizedVia, norm);
           return {
-            lat: parseFloat(nRes.data[0].lat),
-            lng: parseFloat(nRes.data[0].lon),
+            lat: parseFloat(item.lat),
+            lng: parseFloat(item.lon),
+            normalized: merged,
           };
         }
       }
@@ -179,9 +250,12 @@ export default async function geocode(endereco, cep) {
 
     if (fRes?.data?.length > 0) {
       console.log("📍 Coordenadas obtidas via fallback");
+      const item = fRes.data[0];
+      const norm = extractNormalizedFromNominatim(item, cep);
       return {
-        lat: parseFloat(fRes.data[0].lat),
-        lng: parseFloat(fRes.data[0].lon),
+        lat: parseFloat(item.lat),
+        lng: parseFloat(item.lon),
+        normalized: norm,
       };
     }
 

@@ -405,8 +405,8 @@
       estadoSelect.innerHTML = `<option value="">Todos os estados</option>` +
         estados.map(e => `<option value="${e}">${e}</option>`).join("");
 
-      cidadeSelect.innerHTML = `<option value="">Todas as cidades</option>`;
-      cidadeSelect.disabled = true;
+      // populate cidades for current estado (if empty => all cities)
+      updateCidadesByEstado(estadoSelect.value);
     }
 
     function updateCidadesByEstado(estado) {

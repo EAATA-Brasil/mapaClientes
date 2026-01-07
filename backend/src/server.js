@@ -31,11 +31,11 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "../../frontend/index.html"));
 });
 
-// Sincroniza ao iniciar
-syncClientes();
+// // Sincroniza ao iniciar
+// syncClientes();
 
-// Sincroniza a cada 20 minutos
-setInterval(syncClientes, 30 * 60 * 1000);
+// // Sincroniza a cada 20 minutos
+// setInterval(syncClientes, 30 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor rodando em: http://localhost:${PORT}`));
