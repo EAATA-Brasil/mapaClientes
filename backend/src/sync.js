@@ -107,14 +107,15 @@ export async function syncClientes() {
       return null;
     }
 
-    for (const reqName of requested) {
+    for (const entry of requested) {
+      const reqName = entry.name;
       const partner = findMatchingPartner(reqName, customers || []);
       if (!partner) {
         console.warn(`⚠️ Não encontrado no Odoo: ${reqName}`);
         continue;
       }
 
-      await processarCliente(partner, reqName);
+      await processarCliente(partner, entry);
     }
 
     console.log("✅ Sincronização concluída!");
@@ -123,7 +124,7 @@ export async function syncClientes() {
   }
 }
 
-async function processarCliente(c, requestedName = null) {
+async function processarCliente(c, requestedEntry = null) {
   try {
     const logradouro = c.street || "";
     const numero = c.l10n_br_endereco_numero || "";
@@ -148,7 +149,7 @@ async function processarCliente(c, requestedName = null) {
       pais,
     });
 
-    if (requestedName) console.log(`🔎 Origem planilha: ${requestedName}`);
+    if (requestedEntry) console.log(`🔎 Origem planilha: ${requestedEntry.name}`);
 
     console.log(`👤 Parceiro Odoo: [id=${c.id}] ${c.display_name || c.name || '-'} `);
     console.log(`   Endereço Odoo: ${c.street || '-'} ${c.l10n_br_endereco_numero || ''} ${c.street2 || ''} | ${c.l10n_br_endereco_bairro || '-'} | ${c.city || '-'} | ${estadoCompleto || '-'} | CEP=${c.zip || '-'} `);
@@ -250,6 +251,48 @@ async function processarCliente(c, requestedName = null) {
         geo?.lng || null,
       ]
     );
+
+    // --- Persistir equipamentos (se houver dados na planilha) ---
+    const equipmentRaw = String(requestedEntry?.equipment || "").trim();
+    if (equipmentRaw) {
+      // ensure table exists (table name: Itens do pedido)
+      await db.query(`\n        CREATE TABLE IF NOT EXISTS \`Itens do pedido\` (\n          id INT AUTO_INCREMENT PRIMARY KEY,\n          cliente_id INT NOT NULL,\n          nome VARCHAR(255) NOT NULL,\n          quantidade INT DEFAULT NULL,\n          UNIQUE KEY cliente_equip (cliente_id, nome)\n        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n      `);
+
+      // get local cliente id (by id_odoo)
+      const [sel] = await db.query(`SELECT id FROM clientes WHERE id_odoo = ? LIMIT 1`, [c.id]);
+      const clienteId = sel && sel[0] && sel[0].id;
+
+      if (clienteId) {
+        // clear existing equips for this cliente
+        await db.query(`DELETE FROM \`Itens do pedido\` WHERE cliente_id = ?`, [clienteId]);
+
+        // parse equipment string: split by comma/semicolon/pipe/newline
+        const parts = equipmentRaw.split(/[;,\n|]+/).map((p) => p.trim()).filter(Boolean);
+
+        function parsePart(p) {
+          // common forms: 'Equip X', 'Equipamento x2', 'Equip (2)'
+          const m = p.match(/^(.*?)[\s\(x×*]*([0-9]+)\)?\s*$/i);
+          if (m) {
+            const name = m[1].trim();
+            const qty = parseInt(m[2], 10) || null;
+            return { name, qty };
+          }
+          return { name: p, qty: null };
+        }
+
+        for (const part of parts) {
+          const { name, qty } = parsePart(part);
+          try {
+            await db.query(`INSERT INTO \`Itens do pedido\` (cliente_id, nome, quantidade) VALUES (?, ?, ?)`, [clienteId, name, qty]);
+          } catch (e) {
+            // ignore duplicate/key errors
+          }
+        }
+        console.log(`🧰 Equipamentos gravados para cliente_id=${clienteId}: ${parts.length}`);
+      } else {
+        console.log('⚠️ Não encontrou cliente local para associar equipamentos (id_odoo=', c.id, ')');
+      }
+    }
   } catch (err) {
     console.error(`⚠️ Erro processando cliente ${c.name}:`, err);
   }

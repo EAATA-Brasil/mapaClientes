@@ -23,7 +23,30 @@ app.get("/clientes", async (req, res) => {
   const [rows] = await db.query(
     "SELECT * FROM clientes WHERE latitude IS NOT NULL AND longitude IS NOT NULL"
   );
-  res.json(rows);
+
+  if (!rows || !rows.length) return res.json([]);
+
+  try {
+    const ids = rows.map(r => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    const [items] = await db.query(
+      `SELECT cliente_id, nome, quantidade FROM \`Itens do pedido\` WHERE cliente_id IN (${placeholders})`,
+      ids
+    );
+
+    const itemsByClient = new Map();
+    items.forEach(it => {
+      if (!itemsByClient.has(it.cliente_id)) itemsByClient.set(it.cliente_id, []);
+      itemsByClient.get(it.cliente_id).push({ nome: it.nome, quantidade: it.quantidade });
+    });
+
+    const result = rows.map(r => ({ ...r, equipamentos: itemsByClient.get(r.id) || [] }));
+    res.json(result);
+  } catch (err) {
+    console.warn('Erro ao buscar equipamentos (talvez tabela ausente):', err.message || err);
+    // fallback: return clients without equipamentos
+    res.json(rows.map(r => ({ ...r, equipamentos: [] })));
+  }
 });
 
 // Rota Padrão → entregar index.html

@@ -103,7 +103,7 @@ function nameCandidates(original) {
  */
 function readCustomersFromXlsx(
   filePath,
-  { sheetName, customerColumn = "Cliente" } = {}
+  { sheetName, customerColumn = "Cliente", equipmentColumn = "Equipamentos" } = {}
 ) {
   const workbook = xlsx.readFile(filePath);
   const worksheet = workbook.Sheets[sheetName || workbook.SheetNames[0]];
@@ -115,10 +115,13 @@ function readCustomersFromXlsx(
   const rows = xlsx.utils.sheet_to_json(worksheet, { defval: "" });
   if (!rows.length) return [];
 
-  // Encontrar a coluna Cliente (case-insensitive)
+  // Encontrar a coluna Cliente e Equipamento (case-insensitive)
   const keys = Object.keys(rows[0] || {});
   const customerKey = keys.find(
     (k) => k.trim().toLowerCase() === customerColumn.toLowerCase()
+  );
+  const equipmentKey = keys.find(
+    (k) => k.trim().toLowerCase() === equipmentColumn.toLowerCase()
   );
 
   if (!customerKey) {
@@ -128,20 +131,42 @@ function readCustomersFromXlsx(
   }
 
   let lastCustomer = "";
+  let lastEquipment = "";
   const customers = [];
+  const seen = new Map();
+
+  function mergeEquipment(a, b) {
+    if (!a && !b) return "";
+    const parts = [];
+    if (a) parts.push(...String(a).split(/[;,\n|]+/));
+    if (b) parts.push(...String(b).split(/[;,\n|]+/));
+    const s = parts.map((p) => String(p).trim()).filter(Boolean);
+    return [...new Set(s)].join("; ");
+  }
 
   for (const row of rows) {
     let name = String(row[customerKey] ?? "").trim();
+    let equip = equipmentKey ? String(row[equipmentKey] ?? "").trim() : "";
 
-    // 🔥 fill-down (herda o valor da linha acima)
+    // fill-down for both columns
     if (!name) name = lastCustomer;
     if (name) lastCustomer = name;
 
-    if (name) customers.push(name);
+    if (!equip) equip = lastEquipment;
+    if (equip) lastEquipment = equip;
+
+    if (!name) continue;
+
+    if (seen.has(name)) {
+      const idx = seen.get(name);
+      customers[idx].equipment = mergeEquipment(customers[idx].equipment, equip);
+    } else {
+      seen.set(name, customers.length);
+      customers.push({ name, equipment: equip || "" });
+    }
   }
 
-  // remover duplicados (preserva ordem)
-  return [...new Set(customers)];
+  return customers;
 }
 
 /* ======================================================
@@ -174,14 +199,17 @@ function isRequestedFound(requestedName, foundKeySet) {
 ====================================================== */
 export async function getCustomersFromSheet(
   filePath,
-  { sheetName, customerColumn = "Cliente" } = {}
+  { sheetName, customerColumn = "Cliente", equipmentColumn = "Equipamentos" } = {}
 ) {
   const uid = await odooLogin();
 
-  const requested = readCustomersFromXlsx(filePath, {
+  const requestedEntries = readCustomersFromXlsx(filePath, {
     sheetName,
     customerColumn,
+    equipmentColumn,
   });
+
+  const requested = requestedEntries.map((r) => r.name);
 
   if (!requested.length) {
     return { customers: [], notFound: [], requested: [] };
@@ -318,10 +346,10 @@ export async function getCustomersFromSheet(
     foundKeys = buildFoundKeySet(merged);
     notFound = requested.filter((r) => !isRequestedFound(r, foundKeys));
 
-    return { requested, customers: merged, notFound };
+    return { requested: requestedEntries, customers: merged, notFound };
   }
 
-  return { requested, customers: results, notFound };
+  return { requested: requestedEntries, customers: results, notFound };
 }
 
 /* ======================================================
