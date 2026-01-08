@@ -84,17 +84,40 @@
       padding: 10px 12px 12px;
       border-top: 1px solid rgba(0,0,0,0.06);
       background: linear-gradient(#fff, #fbfbfb);
+      align-items: end;
     }
+
+    .filter-group { flex: 1; display:flex; flex-direction:column; gap:6px; }
+    .filter-label { font-size: 12px; color: #666; font-weight: 600; }
+    .filter-count { font-size: 11px; color: #999; margin-left:6px; }
+
+    .filter-actions { display:flex; gap:8px; align-items:center; }
+    .filter-chip-wrap { display:flex; gap:8px; align-items:center; }
+    .chip-group { display:flex; flex-direction:column; gap:6px; }
+    .chips-header { font-size:11px; color:#666; font-weight:700; margin-bottom:4px; }
+    .active-filters { display:flex; gap:8px; align-items:center; overflow:auto; max-width:260px; }
 
     .filters-row select {
       width: 100%;
-      border: 1px solid rgba(0,0,0,0.12);
+      border: 1px solid rgba(0,0,0,0.08);
       border-radius: 10px;
-      padding: 10px 10px;
+      padding: 10px 12px;
       font-size: 14px;
       outline: none;
-      background: #fff;
+      background: linear-gradient(#fff, #fafafa);
+      box-shadow: 0 1px 0 rgba(0,0,0,0.02) inset;
+      transition: border-color 0.12s, box-shadow 0.12s, transform 0.06s;
     }
+    .filters-row select:focus { border-color: #009ee0; box-shadow: 0 2px 12px rgba(0,158,224,0.08); transform: translateY(-1px); }
+
+    .filter-chip { padding: 6px 8px; border-radius: 999px; font-size: 13px; display:inline-flex; gap:8px; align-items:center; border:1px solid rgba(0,0,0,0.06); }
+    .filter-chip button { background: transparent; border: none; cursor:pointer; font-weight:700; font-size:12px; padding:0; margin-left:6px; }
+
+    .filter-chip.state { background: #fff8e6; color:#b06900; border-color: rgba(176,123,0,0.12); }
+    .filter-chip.city { background: #eef9ff; color: #0077b8; border-color: rgba(0,118,170,0.12); }
+
+    .filter-count-badge { background:#f0f4f8; color:#666; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid rgba(0,0,0,0.04); }
+
 
     .meta-row {
       display: flex;
@@ -259,13 +282,34 @@
       </div>
 
       <div class="filters-row">
-        <select id="estadoSelect">
-          <option value="">Todos os estados</option>
-        </select>
-        <select id="cidadeSelect" disabled>
-          <option value="">Todas as cidades</option>
-        </select>
-        <div class="chip" id="fitBtn">Enquadrar</div>
+        <div class="filter-group">
+          <label class="filter-label" for="estadoSelect">Estado</label>
+          <select id="estadoSelect">
+            <option value="">Todos os estados</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label" for="cidadeSelect">Cidade <span id="cidadeCount" class="filter-count filter-count-badge"></span></label>
+          <select id="cidadeSelect">
+            <option value="">Todas as cidades</option>
+          </select>
+        </div>
+
+        <div class="filter-actions">
+          <div id="activeFilters" class="filter-chip-wrap" aria-live="polite">
+            <div class="chip-group" id="stateChipsWrapper" style="display:none">
+              <div class="chips-header">Estados</div>
+              <div id="stateChips" class="active-filters" role="list"></div>
+            </div>
+            <div class="chip-group" id="cityChipsWrapper" style="display:none">
+              <div class="chips-header">Cidades</div>
+              <div id="cityChips" class="active-filters" role="list"></div>
+            </div>
+          </div>
+
+          <div class="chip" id="fitBtn">Enquadrar</div>
+        </div>
       </div>
 
       <div class="meta-row">
@@ -305,6 +349,10 @@
     let clientesView = [];
     let markersLayer = null;
     let markerById = new Map();
+
+    // multi-select state/city sets
+    const selectedStates = new Set();
+    const selectedCities = new Set();
 
     const API_URL = "/clientes"; // ✅ seu endpoint
     const ACCURACY_THRESHOLD = 200;
@@ -386,7 +434,8 @@
             logradouro: (c.logradouro || "").toString(),
             endereco_completo: (c.endereco_completo || "").toString(),
             coords: [Number(c.latitude), Number(c.longitude)],
-            fotos: safeFotos(c.fotos)
+            fotos: safeFotos(c.fotos),
+            equipamentos: Array.isArray(c.equipamentos) ? c.equipamentos : []
           }));
 
         buildFilters();
@@ -407,12 +456,18 @@
 
       // populate cidades for current estado (if empty => all cities)
       updateCidadesByEstado(estadoSelect.value);
+
+      // render current active filters
+      renderActiveFilters();
     }
 
     function updateCidadesByEstado(estado) {
+      // determine active states for filtering (selectedStates union the single estado param if provided)
+      const activeStates = selectedStates.size ? Array.from(selectedStates) : (estado ? [estado] : []);
+
       const cidades = [...new Set(
         clientesRaw
-          .filter(c => !estado || c.estado === estado)
+          .filter(c => !activeStates.length || activeStates.includes(c.estado))
           .map(c => (c.cidade || "").trim())
           .filter(Boolean)
       )].sort((a,b) => a.localeCompare(b, "pt-BR"));
@@ -421,16 +476,38 @@
         cidades.map(c => `<option value="${c}">${c}</option>`).join("");
 
       cidadeSelect.disabled = cidades.length === 0;
+
+      // if we have active states, remove any selected cities that don't belong to them
+      if (selectedStates.size) {
+        const allowed = new Set(cidades);
+        let removedAny = false;
+        Array.from(selectedCities).forEach((city) => {
+          if (!allowed.has(city)) {
+            selectedCities.delete(city);
+            removedAny = true;
+          }
+        });
+        if (removedAny) {
+          applyFiltersAndRender();
+        }
+      }
+
+      // update cidade count badge
+      const countEl = document.getElementById('cidadeCount');
+      if (countEl) countEl.textContent = cidades.length ? `${cidades.length}` : '';
+
+      renderActiveFilters();
     }
 
     function getFilteredClientes() {
       const q = normalizeStr(searchInput.value);
-      const estado = estadoSelect.value;
-      const cidade = cidadeSelect.value;
+
+      const estados = Array.from(selectedStates);
+      const cidades = Array.from(selectedCities);
 
       const filtered = clientesRaw.filter(c => {
-        if (estado && c.estado !== estado) return false;
-        if (cidade && c.cidade !== cidade) return false;
+        if (estados.length && !estados.includes(c.estado)) return false;
+        if (cidades.length && !cidades.includes(c.cidade)) return false;
 
         if (!q) return true;
 
@@ -490,9 +567,10 @@
 
     function renderResultsList() {
       const q = normalizeStr(searchInput.value);
-      // mostra autocomplete se tiver texto
-      const show = q.length >= 1 || estadoSelect.value || cidadeSelect.value;
+      // mostra autocomplete se tiver texto ou filtros ativos (inclui seleção múltipla)
+      const show = q.length >= 1 || estadoSelect.value || cidadeSelect.value || selectedStates.size > 0 || selectedCities.size > 0;
       resultsEl.classList.toggle("show", show);
+      renderActiveFilters();
 
       // limita lista pra não ficar gigante
       const list = clientesView.slice(0, 20);
@@ -526,6 +604,8 @@
     }
 
     function openSidebar(cliente) {
+      // keep active filters visible when opening sidebar
+      renderActiveFilters();
       const sidebar = document.getElementById("sidebar");
       const sidebarContent = document.getElementById("sidebar-content");
       const sidebarTitle = document.getElementById("sidebar-title");
@@ -548,6 +628,10 @@
 
       const endereco = cliente.endereco_completo || [cliente.logradouro, cliente.numero, cliente.bairro, cliente.cidade, cliente.estado, cliente.cep, cliente.pais].filter(Boolean).join(", ");
 
+      const equipHTML = (cliente.equipamentos && cliente.equipamentos.length)
+        ? `<div class="info-item"><strong>Equipamentos:</strong><ul style="margin:8px 0 0 18px;padding:0;">${cliente.equipamentos.map(e => `<li>${e.nome}${e.quantidade ? ' — ' + e.quantidade : ''}</li>`).join('')}</ul></div>`
+        : `<div class="info-item"><strong>Equipamentos:</strong> Não informado</div>`;
+
       sidebarContent.innerHTML = `
         ${galleryHTML}
         <div class="info-item"><strong>Telefone:</strong> ${cliente.telefone || "Não informado"}</div>
@@ -557,6 +641,8 @@
         <div class="info-item"><strong>CEP:</strong> ${cliente.cep || "-"}</div>
         <div class="info-item"><strong>Cidade/UF:</strong> ${(cliente.cidade || "-")} / ${(cliente.estado || "-")}</div>
         <div class="info-item"><strong>Site:</strong> ${cliente.site ? `<a href="${cliente.site}" target="_blank">${cliente.site}</a>` : "Não informado"}</div>
+
+        ${equipHTML}
 
         <div style="display:flex; gap:10px; margin-top:15px;">
           <a href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}"
@@ -589,6 +675,7 @@
     }
 
     function mostrarLocalizacao() {
+      renderActiveFilters();
       if (!navigator.geolocation) {
         alert("Seu navegador não suporta geolocalização.");
         return;
@@ -641,6 +728,60 @@
 
     // === UI handlers ===
     let searchTimer = null;
+
+    // render small active filter chips
+    function renderActiveFilters() {
+      const stateWrapper = document.getElementById('stateChipsWrapper');
+      const cityWrapper = document.getElementById('cityChipsWrapper');
+      const stateContainer = document.getElementById('stateChips');
+      const cityContainer = document.getElementById('cityChips');
+      if (!stateContainer || !cityContainer || !stateWrapper || !cityWrapper) return;
+
+      stateContainer.innerHTML = '';
+      cityContainer.innerHTML = '';
+
+      // states
+      Array.from(selectedStates).forEach(state => {
+        const el = document.createElement('span');
+        el.className = 'filter-chip state';
+        el.setAttribute('role', 'listitem');
+        const btn = document.createElement('button');
+        btn.setAttribute('aria-label', 'Remover filtro de estado');
+        btn.title = 'Remover';
+        btn.textContent = '×';
+        btn.addEventListener('click', () => {
+          selectedStates.delete(state);
+          updateCidadesByEstado('');
+          applyFiltersAndRender();
+          renderActiveFilters();
+        });
+        el.appendChild(document.createTextNode(state + ' '));
+        el.appendChild(btn);
+        stateContainer.appendChild(el);
+      });
+
+      // cities
+      Array.from(selectedCities).forEach(city => {
+        const el = document.createElement('span');
+        el.className = 'filter-chip city';
+        el.setAttribute('role', 'listitem');
+        const btn = document.createElement('button');
+        btn.setAttribute('aria-label', 'Remover filtro de cidade');
+        btn.title = 'Remover';
+        btn.textContent = '×';
+        btn.addEventListener('click', () => {
+          selectedCities.delete(city);
+          applyFiltersAndRender();
+          renderActiveFilters();
+        });
+        el.appendChild(document.createTextNode(city + ' '));
+        el.appendChild(btn);
+        cityContainer.appendChild(el);
+      });
+
+      stateWrapper.style.display = selectedStates.size ? 'flex' : 'none';
+      cityWrapper.style.display = selectedCities.size ? 'flex' : 'none';
+    }
     searchInput.addEventListener("input", () => {
       // debounce
       clearTimeout(searchTimer);
@@ -650,21 +791,35 @@
     });
 
     estadoSelect.addEventListener("change", () => {
-      updateCidadesByEstado(estadoSelect.value);
+      const s = estadoSelect.value;
+      if (!s) return;
+      // add to selectedStates and reset select so user can add more
+      selectedStates.add(s);
+      estadoSelect.value = '';
+      updateCidadesByEstado('');
       applyFiltersAndRender();
+      renderActiveFilters();
     });
 
     cidadeSelect.addEventListener("change", () => {
+      const c = cidadeSelect.value;
+      if (!c) return;
+      selectedCities.add(c);
+      cidadeSelect.value = '';
       applyFiltersAndRender();
+      renderActiveFilters();
     });
 
     clearBtn.addEventListener("click", () => {
       searchInput.value = "";
       estadoSelect.value = "";
       cidadeSelect.value = "";
+      selectedStates.clear();
+      selectedCities.clear();
       updateCidadesByEstado("");
       resultsEl.classList.remove("show");
       applyFiltersAndRender();
+      renderActiveFilters();
     });
 
     fitBtn.addEventListener("click", () => {
@@ -673,11 +828,10 @@
       map.fitBounds(bounds, { padding: [40, 40] });
     });
 
-    // fecha lista ao clicar fora
-    document.addEventListener("click", (e) => {
-      const wrap = document.querySelector(".search-wrap");
-      if (!wrap.contains(e.target)) resultsEl.classList.remove("show");
-    });
+    // NOTA: não escondemos mais a lista ao clicar fora (como no mapa).
+    // A lista de resultados permanece visível enquanto houver texto/filtros ativos
+    // e só é escondida quando o usuário clica em "Limpar".
+    // (Removido handler que removia a classe `show` ao clicar fora.)
 
     mostrarLocalizacao();
     carregarClientes();
