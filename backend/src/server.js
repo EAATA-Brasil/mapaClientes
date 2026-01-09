@@ -30,7 +30,7 @@ app.get("/clientes", async (req, res) => {
     const ids = rows.map(r => r.id);
     const placeholders = ids.map(() => '?').join(',');
     const [items] = await db.query(
-      `SELECT cliente_id, nome, quantidade FROM \`Itens do pedido\` WHERE cliente_id IN (${placeholders})`,
+      `SELECT cliente_id, nome, quantidade FROM equipamentos WHERE cliente_id IN (${placeholders})`,
       ids
     );
 

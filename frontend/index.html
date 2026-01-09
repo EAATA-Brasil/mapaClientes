@@ -624,7 +624,7 @@
       const lat = cliente.coords[0];
       const lng = cliente.coords[1];
       const num = cliente.telefone ? cliente.telefone.replace(/\D/g, "") : (cliente.celular ? cliente.celular.replace(/\D/g,"") : null);
-      const linkWhats = num ? `https://wa.me/55${num}` : null;
+      const linkWhats = num ? `https://wa.me/${num}` : null;
 
       const endereco = cliente.endereco_completo || [cliente.logradouro, cliente.numero, cliente.bairro, cliente.cidade, cliente.estado, cliente.cep, cliente.pais].filter(Boolean).join(", ");
 

@@ -37,20 +37,99 @@ function buildEnderecoCompleto({ logradouro, numero, bairro, cidade, uf, cep, pa
 }
 
 /** =======================
+ * Persistência do cursor de sincronização
+ * ======================= */
+async function ensureSyncStateTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS sync_state (
+      id INT PRIMARY KEY,
+      last_odoo_id INT NULL,
+      last_entry_name VARCHAR(255) NULL,
+      paused_since DATETIME NULL,
+      paused_reason VARCHAR(255) NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Garantir colunas (caso tabela já exista sem as novas colunas)
+  try { await db.query(`ALTER TABLE sync_state ADD COLUMN paused_since DATETIME NULL`); } catch {}
+  try { await db.query(`ALTER TABLE sync_state ADD COLUMN paused_reason VARCHAR(255) NULL`); } catch {}
+}
+
+async function getSyncCursor() {
+  await ensureSyncStateTable();
+  const [rows] = await db.query(`SELECT last_odoo_id, last_entry_name FROM sync_state WHERE id = 1 LIMIT 1`);
+  return rows && rows[0] ? rows[0] : { last_odoo_id: null, last_entry_name: null };
+}
+
+async function setSyncCursor({ last_odoo_id = null, last_entry_name = null }) {
+  await ensureSyncStateTable();
+  await db.query(
+    `INSERT INTO sync_state (id, last_odoo_id, last_entry_name)
+     VALUES (1, ?, ?)
+     ON DUPLICATE KEY UPDATE last_odoo_id = VALUES(last_odoo_id), last_entry_name = VALUES(last_entry_name)`,
+    [last_odoo_id, last_entry_name]
+  );
+}
+
+async function setPause(reason = null) {
+  await ensureSyncStateTable();
+  await db.query(
+    `INSERT INTO sync_state (id, paused_since, paused_reason)
+     VALUES (1, NOW(), ?)
+     ON DUPLICATE KEY UPDATE paused_since = NOW(), paused_reason = VALUES(paused_reason)`,
+    [reason]
+  );
+}
+
+async function clearPause() {
+  await ensureSyncStateTable();
+  await db.query(`UPDATE sync_state SET paused_since = NULL, paused_reason = NULL WHERE id = 1`);
+}
+
+async function getPauseState() {
+  await ensureSyncStateTable();
+  const [rows] = await db.query(`SELECT paused_since, paused_reason FROM sync_state WHERE id = 1 LIMIT 1`);
+  return rows && rows[0] ? rows[0] : { paused_since: null, paused_reason: null };
+}
+
+let clearedPauseOnStartup = false;
+
+/** =======================
  * Sync principal
  * ======================= */
 export async function syncClientes() {
   console.log("🔄 Sincronizando clientes DO EXCEL + Odoo…");
 
   try {
+    // Ao iniciar o processo (primeira execução após restart), limpa o pause
+    if (!clearedPauseOnStartup) {
+      await clearPause();
+      clearedPauseOnStartup = true;
+      console.log("🔁 Limpei estado de pausa (reinício detectado)");
+    } else {
+      // Se estiver pausado por erro de rede, aguardar até 7h para tentar novamente
+      const pause = await getPauseState();
+      if (pause?.paused_since) {
+        const [rows] = await db.query(`SELECT TIMESTAMPDIFF(HOUR, ?, NOW()) AS diffh`, [pause.paused_since]);
+        const diffh = rows && rows[0] ? rows[0].diffh : 0;
+        if (diffh < 7) {
+          console.log(`⏸️ Sincronização pausada por erro de rede (faltam ${7 - diffh}h para nova tentativa). Razão: ${pause.paused_reason || '-'}`);
+          return; // não sincroniza ainda
+        }
+        // 7 horas ou mais: libera nova tentativa
+        console.log("⏱️ 7h passadas desde a pausa. Tentando sincronizar novamente.");
+        await clearPause();
+      }
+    }
+
     // 🔥 CAMINHO DO ARQUIVO EXCEL
-    const filePath = path.resolve(
-      process.cwd(),
-      "clientes.xlsx"
-    );
+    const filePath = path.resolve(process.cwd(), "clientes.xlsx");
 
     // ✅ BUSCA os clientes no Odoo a partir dos nomes na planilha
-    const { requested, customers, notFound } = await getCustomersFromSheet(filePath);
+    const { requested, customers, notFound } = await getCustomersFromSheet(filePath, {
+      equipmentColumn: "Itens do pedido",
+    });
 
     console.log(`📄 Clientes na planilha: ${requested.length}`);
     if (notFound.length) {
@@ -58,11 +137,17 @@ export async function syncClientes() {
     }
 
     function stripAccentsLocal(s) {
-      return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      return String(s || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim();
     }
 
     function normalizeNameLocal(s) {
-      return stripAccentsLocal(String(s || "")).replace(/\s+/g, " ").trim().toLowerCase();
+      return stripAccentsLocal(String(s || ""))
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
     }
 
     function nameCandidatesLocal(original) {
@@ -71,7 +156,10 @@ export async function syncClientes() {
       const cands = new Set();
       cands.add(raw);
       if (raw.includes(",")) {
-        const [a, b] = raw.split(",").map((x) => x.trim()).filter(Boolean);
+        const [a, b] = raw
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
         if (a) cands.add(a);
         if (b) cands.add(b);
       }
@@ -79,7 +167,9 @@ export async function syncClientes() {
     }
 
     function findMatchingPartner(requestedName, partners) {
-      const candidates = nameCandidatesLocal(requestedName).map(normalizeNameLocal).filter(Boolean);
+      const candidates = nameCandidatesLocal(requestedName)
+        .map(normalizeNameLocal)
+        .filter(Boolean);
       if (!candidates.length) return null;
 
       // exact match first
@@ -94,7 +184,7 @@ export async function syncClientes() {
         const pn = normalizeNameLocal(p.display_name || p.name || "");
         for (const c of candidates) {
           if (!pn || !c) continue;
-          const score = (pn.includes(c) || c.includes(pn)) ? 1 : 0;
+          const score = pn.includes(c) || c.includes(pn) ? 1 : 0;
           if (score) scores.push({ p, score, len: pn.length });
         }
       }
@@ -107,18 +197,63 @@ export async function syncClientes() {
       return null;
     }
 
-    for (const entry of requested) {
-      const reqName = entry.name;
-      const partner = findMatchingPartner(reqName, customers || []);
+    // Monta lista de itens com match no Odoo
+    const itens = (requested || []).map((entry, idx) => {
+      const partner = findMatchingPartner(entry.name, customers || []);
+      return { idx, entry, partner };
+    });
+
+    // Lê cursor para retomar após último sincronizado
+    const cursor = await getSyncCursor();
+    let startIdx = 0;
+    if (cursor?.last_odoo_id) {
+      const pos = itens.findIndex((x) => x.partner && x.partner.id === cursor.last_odoo_id);
+      if (pos >= 0) startIdx = pos + 1;
+    } else if (cursor?.last_entry_name) {
+      // fallback: compara por nome (normalizado)
+      const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+      const lastN = norm(cursor.last_entry_name);
+      const pos = itens.findIndex((x) => norm(x.entry?.name) === lastN);
+      if (pos >= 0) startIdx = pos + 1;
+    }
+
+    if (startIdx > 0) {
+      console.log(`⏩ Retomando sincronização a partir do índice ${startIdx} (após o último processado).`);
+    }
+
+    let interrupted = false;
+    for (let i = startIdx; i < itens.length; i++) {
+      const { entry, partner } = itens[i];
+      const reqName = entry?.name;
       if (!partner) {
         console.warn(`⚠️ Não encontrado no Odoo: ${reqName}`);
         continue;
       }
 
-      await processarCliente(partner, entry);
+      try {
+        const ok = await processarCliente(partner, entry);
+        if (ok) {
+          // Atualiza cursor após sucesso
+          await setSyncCursor({ last_odoo_id: partner.id, last_entry_name: reqName });
+        }
+      } catch (err) {
+        const msg = String(err?.message || "");
+        const code = err?.code;
+        if (err?.name === "NominatimNetworkError" || msg.includes("Falha de rede no Nominatim")) {
+          console.error("🛑 Parando sincronização por erro de rede do Nominatim:", code || msg);
+          await setPause(code || msg);
+          interrupted = true;
+          break; // interrompe até que o sistema seja reiniciado
+        }
+        console.error("⚠️ Erro inesperado processando cliente:", msg);
+      }
     }
 
-    console.log("✅ Sincronização concluída!");
+    if (interrupted) {
+      console.log("⛔ Sincronização interrompida (aguardando reinício do sistema).");
+    } else {
+      console.log("✅ Sincronização concluída!");
+    }
   } catch (err) {
     console.error("❌ ERRO PRINCIPAL:", err);
   }
@@ -126,64 +261,100 @@ export async function syncClientes() {
 
 async function processarCliente(c, requestedEntry = null) {
   try {
+    // --- Dados do Odoo ---
     const logradouro = c.street || "";
     const numero = c.l10n_br_endereco_numero || "";
     const complemento = c.street2 || "";
     const bairro = c.l10n_br_endereco_bairro || "";
     const cidade = c.city || "";
 
-    const estadoCompleto = c.state_id ? c.state_id[1] : "";
-    const estadoSiglaRaw = estadoCompleto.match(/\((.*?)\)/)?.[1] || "";
-    const estadoSigla = cleanUF(estadoSiglaRaw);
+    // ⚠️ No Odoo, state_id[1] geralmente vem "São Paulo" (sem "(SP)")
+    const estadoNome = c.state_id ? c.state_id[1] : "";
+    const estadoSiglaOdoo =
+      cleanUF(c.state_code) ||
+      cleanUF(c.l10n_br_state_code) ||
+      null;
 
     const cep = c.zip || "";
     const pais = c.country_id ? c.country_id[1] : "Brasil";
 
+    // --- Monta query inicial (pode não ter UF ainda) ---
     const enderecoCompleto = buildEnderecoCompleto({
       logradouro,
       numero,
       bairro,
       cidade,
-      uf: estadoSigla,
+      uf: estadoSiglaOdoo, // pode ser null
       cep,
       pais,
     });
 
     if (requestedEntry) console.log(`🔎 Origem planilha: ${requestedEntry.name}`);
 
-    console.log(`👤 Parceiro Odoo: [id=${c.id}] ${c.display_name || c.name || '-'} `);
-    console.log(`   Endereço Odoo: ${c.street || '-'} ${c.l10n_br_endereco_numero || ''} ${c.street2 || ''} | ${c.l10n_br_endereco_bairro || '-'} | ${c.city || '-'} | ${estadoCompleto || '-'} | CEP=${c.zip || '-'} `);
-    console.log(`📝 Query construída: ${enderecoCompleto || '(nenhum endereço construído)'}`);
+    console.log(
+      `👤 Parceiro Odoo: [id=${c.id}] ${c.display_name || c.name || "-"} `
+    );
+    console.log(
+      `   Endereço Odoo: ${c.street || "-"} ${c.l10n_br_endereco_numero || ""} ${
+        c.street2 || ""
+      } | ${c.l10n_br_endereco_bairro || "-"} | ${c.city || "-"} | ${
+        estadoNome || "-"
+      } | CEP=${c.zip || "-"} `
+    );
+    console.log(`📝 Query construída: ${enderecoCompleto || "(nenhum endereço construído)"}`);
 
+    // --- Geocode ---
     const geo = enderecoCompleto
       ? await geocode(enderecoCompleto, normalizeCep(cep))
       : null;
 
-      // procura por outros clientes que possam corresponder ao mesmo endereço normalizado
-      async function findMatches() {
-        const cepNorm = normalizeCep(geo?.normalized?.cep || cep);
-        const conditions = [];
-        const params = [];
+    // ✅ AQUI é a correção principal:
+    // Se o geocode normalizou com UF (ex: "... Maceió, AL, Brasil"),
+    // usamos essa UF para salvar no banco.
+    const ufFromGeocode =
+      cleanUF(geo?.normalized?.uf) ||
+      cleanUF(geo?.normalized?.estado) ||
+      cleanUF(geo?.normalized?.state) ||
+      cleanUF(geo?.normalized?.state_code) ||
+      null;
 
-        if (cepNorm) {
-          conditions.push("REPLACE(cep, '-', '') = ?");
-          params.push(cepNorm);
-        }
+    const estadoSiglaFinal = estadoSiglaOdoo || ufFromGeocode;
 
-        if (cidade) {
-          conditions.push("LOWER(cidade) = ?");
-          params.push(cidade.toLowerCase());
-        }
+    // (Opcional) log pra bater o olho
+    if (geo?.normalized) {
+      console.log(
+        `🧭 Normalizado: ${geo.normalized?.logradouro || "-"}, ${geo.normalized?.cidade || "-"}, ${
+          geo.normalized?.uf || geo.normalized?.state_code || "-"
+        }, ${geo.normalized?.pais || "Brasil"}`
+      );
+    }
+    console.log(`🏷️ UF escolhida p/ salvar: ${estadoSiglaFinal || "(null)"}`);
 
-        if (logradouro) {
-          conditions.push("LOWER(logradouro) LIKE ?");
-          params.push(`%${logradouro.toLowerCase()}%`);
-        }
+    // procura por outros clientes que possam corresponder ao mesmo endereço normalizado
+    async function findMatches() {
+      const cepNorm = normalizeCep(geo?.normalized?.cep || cep);
+      const conditions = [];
+      const params = [];
 
-        if (conditions.length === 0) return [];
+      if (cepNorm) {
+        conditions.push("REPLACE(cep, '-', '') = ?");
+        params.push(cepNorm);
+      }
 
-        const where = conditions.join(' OR ');
-        const sql = `
+      if (cidade) {
+        conditions.push("LOWER(cidade) = ?");
+        params.push(cidade.toLowerCase());
+      }
+
+      if (logradouro) {
+        conditions.push("LOWER(logradouro) LIKE ?");
+        params.push(`%${logradouro.toLowerCase()}%`);
+      }
+
+      if (conditions.length === 0) return [];
+
+      const where = conditions.join(" OR ");
+      const sql = `
           SELECT id, id_odoo, nome, cep, logradouro, cidade
           FROM clientes
           WHERE (id_odoo IS NULL OR id_odoo != ?)
@@ -191,21 +362,26 @@ async function processarCliente(c, requestedEntry = null) {
           LIMIT 10
         `;
 
-        const [rows] = await db.query(sql, [c.id, ...params]);
-        return rows;
-      }
+      const [rows] = await db.query(sql, [c.id, ...params]);
+      return rows;
+    }
 
-      const matches = await findMatches();
-      if (matches && matches.length) {
-        console.log('🔎 Possíveis clientes com mesmo endereço:');
-        for (const m of matches) {
-          console.log(`  - [id=${m.id} | odoo=${m.id_odoo ?? '-'}] ${m.nome} | ${m.cep || '-'} | ${m.cidade || '-'} | ${m.logradouro || '-'} `);
-        }
-      } else {
-        console.log('🔎 Nenhum outro cliente encontrado com esse endereço normalizado');
+    const matches = await findMatches();
+    if (matches && matches.length) {
+      console.log("🔎 Possíveis clientes com mesmo endereço:");
+      for (const m of matches) {
+        console.log(
+          `  - [id=${m.id} | odoo=${m.id_odoo ?? "-"}] ${m.nome} | ${m.cep || "-"} | ${
+            m.cidade || "-"
+          } | ${m.logradouro || "-"} `
+        );
       }
+    } else {
+      console.log("🔎 Nenhum outro cliente encontrado com esse endereço normalizado");
+    }
 
-      await db.query(
+    // --- Salvar cliente ---
+    await db.query(
       `INSERT INTO clientes (
         id_odoo, nome, telefone, celular, email, site,
         logradouro, numero, complemento, bairro, cidade,
@@ -243,7 +419,7 @@ async function processarCliente(c, requestedEntry = null) {
         complemento,
         bairro,
         cidade,
-        estadoSigla,
+        estadoSiglaFinal, // ✅ agora salva UF vindo do geocode quando Odoo não tiver
         normalizeCep(cep),
         pais,
         enderecoCompleto,
@@ -255,8 +431,16 @@ async function processarCliente(c, requestedEntry = null) {
     // --- Persistir equipamentos (se houver dados na planilha) ---
     const equipmentRaw = String(requestedEntry?.equipment || "").trim();
     if (equipmentRaw) {
-      // ensure table exists (table name: Itens do pedido)
-      await db.query(`\n        CREATE TABLE IF NOT EXISTS \`Itens do pedido\` (\n          id INT AUTO_INCREMENT PRIMARY KEY,\n          cliente_id INT NOT NULL,\n          nome VARCHAR(255) NOT NULL,\n          quantidade INT DEFAULT NULL,\n          UNIQUE KEY cliente_equip (cliente_id, nome)\n        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n      `);
+      // ensure table exists (table name: equipamentos)
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS equipamentos (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          cliente_id INT NOT NULL,
+          nome VARCHAR(255) NOT NULL,
+          quantidade INT DEFAULT NULL,
+          UNIQUE KEY cliente_equip (cliente_id, nome)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      `);
 
       // get local cliente id (by id_odoo)
       const [sel] = await db.query(`SELECT id FROM clientes WHERE id_odoo = ? LIMIT 1`, [c.id]);
@@ -264,7 +448,7 @@ async function processarCliente(c, requestedEntry = null) {
 
       if (clienteId) {
         // clear existing equips for this cliente
-        await db.query(`DELETE FROM \`Itens do pedido\` WHERE cliente_id = ?`, [clienteId]);
+        await db.query(`DELETE FROM equipamentos WHERE cliente_id = ?`, [clienteId]);
 
         // parse equipment string: split by comma/semicolon/pipe/newline
         const parts = equipmentRaw.split(/[;,\n|]+/).map((p) => p.trim()).filter(Boolean);
@@ -283,17 +467,27 @@ async function processarCliente(c, requestedEntry = null) {
         for (const part of parts) {
           const { name, qty } = parsePart(part);
           try {
-            await db.query(`INSERT INTO \`Itens do pedido\` (cliente_id, nome, quantidade) VALUES (?, ?, ?)`, [clienteId, name, qty]);
+            await db.query(
+              `INSERT INTO equipamentos (cliente_id, nome, quantidade) VALUES (?, ?, ?)`,
+              [clienteId, name, qty]
+            );
           } catch (e) {
             // ignore duplicate/key errors
           }
         }
         console.log(`🧰 Equipamentos gravados para cliente_id=${clienteId}: ${parts.length}`);
       } else {
-        console.log('⚠️ Não encontrou cliente local para associar equipamentos (id_odoo=', c.id, ')');
+        console.log("⚠️ Não encontrou cliente local para associar equipamentos (id_odoo=", c.id, ")");
       }
     }
+    return true;
   } catch (err) {
+    const msg = String(err?.message || "");
+    if (err?.name === "NominatimNetworkError" || msg.includes("Falha de rede no Nominatim")) {
+      // Propaga erro fatal para parar a sincronização
+      throw err;
+    }
     console.error(`⚠️ Erro processando cliente ${c.name}:`, err);
+    return false;
   }
 }

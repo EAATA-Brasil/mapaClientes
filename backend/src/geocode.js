@@ -155,6 +155,14 @@ async function nominatimSearch(query, tries = 4) {
         const code = err?.code || err?.message;
         console.log(`⚠️ Falha de rede no Nominatim: ${code}`);
 
+        // Requisito: se ETIMEDOUT ou ECONNREFUSED, parar a sincronização (propagar erro fatal)
+        if (code === "ETIMEDOUT" || code === "ECONNREFUSED") {
+          const fatal = new Error(`Falha de rede no Nominatim: ${code}`);
+          fatal.name = "NominatimNetworkError";
+          fatal.code = code;
+          throw fatal;
+        }
+
         if (isRetryableNetworkError(err)) {
           const backoff = 4000 * (i + 1);
           await sleep(backoff, `erro de rede ${code}`);
