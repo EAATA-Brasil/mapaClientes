@@ -453,15 +453,35 @@ async function processarCliente(c, requestedEntry = null) {
         // parse equipment string: split by comma/semicolon/pipe/newline
         const parts = equipmentRaw.split(/[;,\n|]+/).map((p) => p.trim()).filter(Boolean);
 
+        function sanitizeEquipmentName(raw) {
+          let s = String(raw || "").trim();
+          // normalizar traços tipográficos
+          s = s.replace(/[–—]/g, "-");
+
+          // remover prefixos como "S/2025/63699 - "
+          s = s.replace(/^[A-Za-z]\/[0-9]{4}\/[0-9]+\s*[-–—]\s*/i, "");
+
+          // se houver bloco em colchetes, manter apenas o que vem DEPOIS dele
+          const br = s.match(/\[[^\]]+\]\s*(.+)$/);
+          if (br) s = br[1];
+
+          // remover separadores/pontuação iniciais remanescentes
+          s = s.replace(/^[\s\-–—:]+/, "");
+
+          // colapsar espaços
+          s = s.replace(/\s+/g, " ").trim();
+          return s;
+        }
+
         function parsePart(p) {
-          // common forms: 'Equip X', 'Equipamento x2', 'Equip (2)'
-          const m = p.match(/^(.*?)[\s\(x×*]*([0-9]+)\)?\s*$/i);
-          if (m) {
-            const name = m[1].trim();
-            const qty = parseInt(m[2], 10) || null;
-            return { name, qty };
-          }
-          return { name: p, qty: null };
+          // Captura quantidade no fim em formatos comuns: ' — 2', '- 2', 'x2', '(2)', '×2'
+          const m = p.match(/^(.*?)(?:[\s\-–—x×\(*]*([0-9]+)\)?)?\s*$/i);
+          let name = m ? String(m[1] || "").trim() : String(p || "").trim();
+          const qty = m && m[2] ? parseInt(m[2], 10) || null : null;
+
+          // higienização pedida: manter apenas o que vier após o bloco em colchetes [CÓDIGO]
+          name = sanitizeEquipmentName(name);
+          return { name, qty };
         }
 
         for (const part of parts) {
