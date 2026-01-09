@@ -461,6 +461,9 @@ async function processarCliente(c, requestedEntry = null) {
           // remover prefixos como "S/2025/63699 - "
           s = s.replace(/^[A-Za-z]\/[0-9]{4}\/[0-9]+\s*[-–—]\s*/i, "");
 
+          // remover prefixos numéricos como "164669- "
+          s = s.replace(/^\d+\s*[-–—]\s*/, "");
+
           // se houver bloco em colchetes, manter apenas o que vem DEPOIS dele
           const br = s.match(/\[[^\]]+\]\s*(.+)$/);
           if (br) s = br[1];
@@ -484,15 +487,30 @@ async function processarCliente(c, requestedEntry = null) {
           return { name, qty };
         }
 
+        // Agregar por nome para evitar duplicados pós-higienização
+        function combineQty(a, b) {
+          if (a == null && b == null) return null;
+          if (a == null) return b;
+          if (b == null) return a;
+          return a + b;
+        }
+
+        const aggregated = new Map(); // nome -> quantidade agregada
         for (const part of parts) {
           const { name, qty } = parsePart(part);
+          if (!name) continue;
+          const prev = aggregated.get(name);
+          aggregated.set(name, prev === undefined ? qty : combineQty(prev, qty));
+        }
+
+        for (const [name, qty] of aggregated.entries()) {
           try {
             await db.query(
               `INSERT INTO equipamentos (cliente_id, nome, quantidade) VALUES (?, ?, ?)`,
               [clienteId, name, qty]
             );
           } catch (e) {
-            // ignore duplicate/key errors
+            // ignore duplicate/key errors (deve ser raro após agregação)
           }
         }
         console.log(`🧰 Equipamentos gravados para cliente_id=${clienteId}: ${parts.length}`);
